@@ -2,74 +2,144 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
 from sklearn.cluster import KMeans
-from keras.applications.resnet50 import ResNet50, preprocess_input
+from sklearn.preprocessing import normalize
+
 
 BASE_PATH = "/Users/alexandrabontidean/Desktop/Dataset/colored/images"
-IMAGE_SIZE = (224, 224)
+
+TRAIN_PATH = "/Users/alexandrabontidean/PycharmProjects/stoma/dataset"
+
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 8
+EPOCHS = 10
 N_CLUSTERS = 3
 
-def load_images(folder_path, image_size=(224, 224)):
-    img_list = []
-    img_names = []
+print("\n[INFO] Se încarcă datele de antrenare...")
 
-    for fname in os.listdir(folder_path):
-        if not fname.lower().endswith((".png", ".jpg", ".jpeg")):
-            continue
+datagen = ImageDataGenerator(
+    preprocessing_function=preprocess_input,
+    validation_split=0.2
+)
 
-        fpath = os.path.join(folder_path, fname)
+train_gen = datagen.flow_from_directory(
+    TRAIN_PATH,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode="binary",
+    subset="training",
+    shuffle=True
+)
 
-        try:
-            img = Image.open(fpath).convert("RGB")
-            img = img.resize(image_size)
-            img_np = np.array(img).astype("float32")
-            img_list.append(img_np)
-            img_names.append(fname)
+val_gen = datagen.flow_from_directory(
+    TRAIN_PATH,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode="binary",
+    subset="validation",
+    shuffle=False
+)
 
-        except Exception as e:
-            print(f"nu s-a putut incarcaa {fname}: {e}")
+print("[INFO] Clase:", train_gen.class_indices)
 
-    return np.array(img_list), img_names
+print("\n[INFO] Se construiește modelul...")
+
+base_model = ResNet50(
+    weights="imagenet",
+    include_top=False,
+    pooling="avg",
+    input_shape=(224, 224, 3)
+)
+
+base_model.trainable = False
+
+x = base_model.output
+x = Dense(256, activation="relu")(x)
+x = Dropout(0.5)(x)
+output = Dense(1, activation="sigmoid")(x)
+
+model = Model(inputs=base_model.input, outputs=output)
+
+model.compile(
+    optimizer="adam",
+    loss="binary_crossentropy",
+    metrics=["accuracy"]
+)
+
+model.summary()
+
+print("\n[INFO] Pornesc antrenarea...")
+
+history = model.fit(
+    train_gen,
+    validation_data=val_gen,
+    epochs=EPOCHS
+)
+
+model.save("caries_detector_resnet50.h5")
+print("[INFO] Model salvat ca caries_detector_resnet50.h5")
 
 
-print("se incarca imaginile...")
-images, image_names = load_images(BASE_PATH, IMAGE_SIZE)
-print(f"s-au incarcat {len(images)} imagini.")
+def load_images(folder, size):
+    imgs = []
+    names = []
+
+    for fname in os.listdir(folder):
+        if fname.lower().endswith((".jpg", ".png", ".jpeg")):
+            path = os.path.join(folder, fname)
+            try:
+                img = Image.open(path).convert("RGB")
+                img = img.resize(size)
+                imgs.append(np.array(img))
+                names.append(fname)
+            except Exception as e:
+                print(f"Eroare la {fname}: {e}")
+
+    return np.array(imgs), names
 
 
-print("se proceseaza imaginile...")
+print("\n[INFO] Se încarcă imaginile pentru clustering...")
+images, image_names = load_images(BASE_PATH, IMG_SIZE)
+print(f"[INFO] {len(images)} imagini încărcate")
+
+
+print("\n[INFO] Extrag feature-uri...")
+
 X = preprocess_input(images)
-print("shape X:", X.shape, X.dtype)
 
-print("incarc ResNet50...")
-base_model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
+feature_extractor = Model(
+    inputs=model.input,
+    outputs=model.layers[-3].output
+)
 
-print("pornesc extragerea feature-urilor...")
-features = base_model.predict(X, verbose=1)
-print("s-au extras feature-urile:", features.shape)
+features = feature_extractor.predict(X)
+features_norm = normalize(features)
 
-#normalizarea
-features_norm = features / np.linalg.norm(features, axis=1, keepdims=True)
+print("\n[INFO] Pornesc clustering-ul...")
 
-print("pornesc clustering-ul...")
-kmeans = KMeans(n_clusters=N_CLUSTERS, random_state=42, n_init='auto')
-labels = kmeans.fit_predict(features_norm)
-print("clustering efectuat.")
+kmeans = KMeans(n_clusters=N_CLUSTERS, random_state=42)
+cluster_labels = kmeans.fit_predict(features_norm)
 
-print("se afiseaza rezultatele clustering-ului...")
+print("[INFO] Clustering finalizat!")
 
-for cluster in range(N_CLUSTERS):
-    cluster_idx = np.where(labels == cluster)[0]
+
+for c in range(N_CLUSTERS):
+    idx = np.where(cluster_labels == c)[0]
 
     plt.figure(figsize=(12, 4))
-    plt.suptitle(f"Cluster {cluster + 1} - {len(cluster_idx)} imagini", fontsize=16)
+    plt.suptitle(f"Cluster {c + 1} - {len(idx)} imagini", fontsize=16)
 
-    for i, idx in enumerate(cluster_idx[:10]):
-        plt.subplot(1, 10, i + 1)
-        plt.imshow(images[idx].astype(np.uint8))
+    for i, j in enumerate(idx[:8]):
+        plt.subplot(1, 8, i + 1)
+        plt.imshow(images[j].astype(np.uint8))
         plt.axis("off")
-        plt.title(image_names[idx], fontsize=7)
+        plt.title(image_names[j], fontsize=7)
 
     plt.show()
-
-print("gata!!!!!")

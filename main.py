@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 
+import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.applications.resnet50 import preprocess_input
 from tensorflow.keras.models import Model
@@ -13,14 +14,25 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import normalize
 
 
+# =====================================
+# CONFIGURARE
+# =====================================
+
+# imagini pentru inferență + clustering
 BASE_PATH = "/Users/alexandrabontidean/Desktop/Dataset/colored/images"
 
+# date etichetate pentru antrenare
 TRAIN_PATH = "/Users/alexandrabontidean/PycharmProjects/stoma/dataset"
 
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 8
 EPOCHS = 10
-N_CLUSTERS = 3
+N_CLUSTERS = 2   # HEALTHY vs CARIES
+
+
+# =====================================
+# 1. ÎNCĂRCARE DATE ANTRENARE
+# =====================================
 
 print("\n[INFO] Se încarcă datele de antrenare...")
 
@@ -47,7 +59,12 @@ val_gen = datagen.flow_from_directory(
     shuffle=False
 )
 
-print("[INFO] Clase:", train_gen.class_indices)
+print("[INFO] Clase detectate:", train_gen.class_indices)
+
+
+# =====================================
+# 2. DEFINIRE MODEL
+# =====================================
 
 print("\n[INFO] Se construiește modelul...")
 
@@ -75,71 +92,105 @@ model.compile(
 
 model.summary()
 
+
+# =====================================
+# 3. ANTRENARE
+# =====================================
+
 print("\n[INFO] Pornesc antrenarea...")
 
-history = model.fit(
+model.fit(
     train_gen,
     validation_data=val_gen,
     epochs=EPOCHS
 )
 
 model.save("caries_detector_resnet50.h5")
-print("[INFO] Model salvat ca caries_detector_resnet50.h5")
+print("[INFO] Model salvat: caries_detector_resnet50.h5")
 
+
+# =====================================
+# 4. ÎNCĂRCARE IMAGINI PENTRU TESTARE
+# =====================================
 
 def load_images(folder, size):
-    imgs = []
-    names = []
-
-    for fname in os.listdir(folder):
-        if fname.lower().endswith((".jpg", ".png", ".jpeg")):
-            path = os.path.join(folder, fname)
-            try:
-                img = Image.open(path).convert("RGB")
-                img = img.resize(size)
-                imgs.append(np.array(img))
-                names.append(fname)
-            except Exception as e:
-                print(f"Eroare la {fname}: {e}")
-
-    return np.array(imgs), names
+    images, names = [], []
+    for f in os.listdir(folder):
+        if f.lower().endswith((".jpg", ".png", ".jpeg")):
+            path = os.path.join(folder, f)
+            img = Image.open(path).convert("RGB").resize(size)
+            images.append(np.array(img))
+            names.append(f)
+    return np.array(images), names
 
 
-print("\n[INFO] Se încarcă imaginile pentru clustering...")
+print("\n[INFO] Se încarcă imaginile pentru analiză...")
 images, image_names = load_images(BASE_PATH, IMG_SIZE)
 print(f"[INFO] {len(images)} imagini încărcate")
 
 
-print("\n[INFO] Extrag feature-uri...")
+# =====================================
+# 5. EXTRAGERE FEATURE-URI
+# =====================================
 
 X = preprocess_input(images)
 
 feature_extractor = Model(
     inputs=model.input,
-    outputs=model.layers[-3].output
+    outputs=model.layers[-3].output  # Dense(256)
 )
 
 features = feature_extractor.predict(X)
 features_norm = normalize(features)
 
+
+# =====================================
+# 6. CLUSTERING KMEANS
+# =====================================
+
 print("\n[INFO] Pornesc clustering-ul...")
 
-kmeans = KMeans(n_clusters=N_CLUSTERS, random_state=42)
+kmeans = KMeans(n_clusters=N_CLUSTERS, random_state=42, n_init=10)
 cluster_labels = kmeans.fit_predict(features_norm)
 
-print("[INFO] Clustering finalizat!")
+for c in range(N_CLUSTERS):
+    print(f"Cluster {c}: {np.sum(cluster_labels == c)} imagini")
 
+
+# =====================================
+# 7. AFIȘARE CLUSTERE
+# =====================================
 
 for c in range(N_CLUSTERS):
     idx = np.where(cluster_labels == c)[0]
+
+    if len(idx) == 0:
+        print(f"[WARN] Cluster {c + 1} este gol.")
+        continue
 
     plt.figure(figsize=(12, 4))
     plt.suptitle(f"Cluster {c + 1} - {len(idx)} imagini", fontsize=16)
 
     for i, j in enumerate(idx[:8]):
         plt.subplot(1, 8, i + 1)
-        plt.imshow(images[j].astype(np.uint8))
+        plt.imshow(images[j])
         plt.axis("off")
         plt.title(image_names[j], fontsize=7)
 
     plt.show()
+
+
+# =====================================
+# 8. CLASIFICARE CARIES vs HEALTHY (CORECT)
+# =====================================
+
+print("\n[INFO] Clasificare finală cu CNN...")
+
+preds = model.predict(X)
+pred_labels = (preds > 0.5).astype(int).ravel()
+
+for label, name in zip(pred_labels[:10], image_names[:10]):
+    cls = "CARIES" if label == 1 else "HEALTHY"
+    print(f"{name} → {cls}")
+
+print("\nEXECUȚIE FINALIZATĂ CU SUCCES")
